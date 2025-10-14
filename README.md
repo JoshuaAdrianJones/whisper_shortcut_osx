@@ -7,11 +7,10 @@ A local speech-to-text application using OpenAI's Whisper model with keyboard sh
 ## Features
 
 - **Local Processing**: Complete privacy - no data sent to external servers
-- **Manual Recording Control**: Start/stop recording with keyboard shortcut
-- **macOS Integration**: Native text insertion that works with any application
+- **Menubar App**: Runs in your macOS menubar with visual status indicators
+- **Keyboard Shortcuts**: Double-tap right Option (⌥) to start recording, single tap to stop
+- **macOS Integration**: Automatic text insertion at cursor position in any application
 - **Performance Optimized**: Uses faster-whisper with CPU optimization
-- **Keyboard Shortcut**: Cmd+Shift+S to toggle recording
-- **Simple Operation**: Press once to start, press again to stop
 
 ## Installation
 
@@ -23,34 +22,34 @@ pip install -r requirements.txt
 
 Or install individually:
 ```bash
-pip install faster-whisper pynput pyperclip sounddevice webrtcvad numpy
+pip install faster-whisper pynput pyperclip sounddevice numpy rumps
 ```
 
 ### 2. macOS Permissions Setup
 
 #### Accessibility Permissions
-1. Open **System Preferences** → **Security & Privacy** → **Privacy**
-2. Select **Accessibility** from the left sidebar
-3. Click the lock icon and enter your password
-4. Click the **+** button and add:
+1. Open **System Settings** → **Privacy & Security** → **Accessibility**
+2. Click the **+** button and add:
    - **Terminal** (if running from Terminal)
    - **Your IDE** (if running from VS Code, PyCharm, etc.)
    - Or **Python** executable (if running directly)
 
 #### Microphone Permissions
-1. In the same **Privacy** section, select **Microphone**
+1. In **Privacy & Security**, select **Microphone**
 2. Add the same applications as above
 3. Ensure they're checked/enabled
 
-### 3. Test Audio Setup (Optional)
-
-```bash
-python3 -c "import sounddevice as sd; print(sd.query_devices())"
-```
-
 ## Usage
 
-### Running the App
+### Running the Menubar App (Recommended)
+
+```bash
+python3 whisper_menubar.py
+```
+
+The app appears in your menubar with a 🎤 icon that changes to 🔴 when recording.
+
+### Running the Command-Line Version
 
 ```bash
 python3 whisper_dictation.py
@@ -58,39 +57,52 @@ python3 whisper_dictation.py
 
 ### Controls
 
-- **Cmd+Shift+S**: Start/stop recording
+- **Double-tap right Option (⌥⌥)**: Start recording
+- **Single tap right Option (⌥)**: Stop recording
+- **Menubar Menu**: Click the 🎤 icon to start/stop or view status
 - **Ctrl+C**: Quit the application
 
-### Recording Behavior
+### How It Works
 
-1. Press the hotkey to start recording
-2. Speak naturally - recording continues until you press the hotkey again
-3. Press the hotkey again to stop recording
-4. Text is automatically processed and inserted at your cursor position
+1. Double-tap the right Option (⌥) key to start recording
+2. Speak naturally - the 🎤 icon changes to 🔴 while recording
+3. Single tap the right Option key to stop
+4. Text is automatically transcribed and inserted at your cursor position
 
 ## Configuration
 
-You can modify these settings in the script:
+You can modify these settings in `whisper_dictation.py`:
 
 ```python
 # Model size (tiny, base, small, medium, large)
-self.model_size = "small"  # Default: good balance of speed/accuracy
+self.model_size = "base"  # Default: fast with good accuracy
 
 # Audio settings
 self.sample_rate = 16000  # Audio sample rate
 ```
 
+### Model Selection
+- `tiny`: Fastest, least accurate
+- `base`: Good balance (current default)
+- `small`: Better accuracy, slower
+- `medium/large`: Best accuracy, much slower
+
 ## Troubleshooting
 
 ### Common Issues
 
+#### Menubar icon not showing
+- Make sure you're running `python3 whisper_menubar.py`
+- Check that rumps is properly installed: `pip show rumps`
+- View logs at `/tmp/whispermenubar.err.log` and `/tmp/whispermenubar.out.log`
+
 #### "Permission denied" or hotkeys not working
 - **Solution**: Ensure accessibility permissions are granted
-- **Check**: System Preferences → Security & Privacy → Privacy → Accessibility
+- **Check**: System Settings → Privacy & Security → Accessibility
 
 #### Microphone not detected
 - **Solution**: Grant microphone permissions
-- **Check**: System Preferences → Security & Privacy → Privacy → Microphone
+- **Check**: System Settings → Privacy & Security → Microphone
 
 #### Text not inserting
 - **Solution**: The app falls back to clipboard if direct insertion fails
@@ -99,7 +111,7 @@ self.sample_rate = 16000  # Audio sample rate
 #### Poor transcription quality
 - **Solutions**:
   - Use a better model: Change `model_size` to "small" or "medium"
-  - Improve audio quality: Use external microphone, reduce background noise
+  - Use an external microphone and reduce background noise
   - Speak clearly and at moderate pace
 
 #### "No module named" errors
@@ -108,41 +120,47 @@ self.sample_rate = 16000  # Audio sample rate
 pip install [missing_package_name]
 ```
 
-## Performance Tips
-
-### Model Selection
-- `tiny`: Fastest, least accurate
-- `base`: Good balance
-- `small`: Better accuracy, slower (current default)
-- `medium/large`: Best accuracy, much slower
-
-### Audio Quality
-- Use external microphone when possible
-- Minimize background noise
-- Speak at normal volume and pace
-
 ## Advanced Configuration
-
-### Custom Hotkey
-
-To change the hotkey combination, modify this line in the script:
-```python
-'<cmd>+<shift>+s': self._on_hotkey_pressed
-```
-
-Example alternatives:
-- `'<cmd>+<shift>+<space>'`: Cmd+Shift+Space
-- `'<ctrl>+<alt>+<space>'`: Ctrl+Option+Space
-- `'<cmd>+<alt>+<space>'`: Cmd+Option+Space
 
 ### Language Support
 
-Whisper supports multiple languages. To specify a language:
+Whisper supports multiple languages. To specify a language, modify the transcription call in `whisper_dictation.py`:
 ```python
 segments, info = self.model.transcribe(
     audio_file,
     language="en",  # or "es", "fr", "de", etc.
 )
+```
+
+### Auto-Start on Login (Optional)
+
+To launch the menubar app automatically at login, create a LaunchAgent plist file at `~/Library/LaunchAgents/com.user.whispermenubar.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.whispermenubar</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/path/to/your/whisper_menubar.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/tmp/whispermenubar.err.log</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/whispermenubar.out.log</string>
+</dict>
+</plist>
+```
+
+Then load it with:
+```bash
+launchctl load ~/Library/LaunchAgents/com.user.whispermenubar.plist
 ```
 
 ## System Requirements

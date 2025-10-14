@@ -20,7 +20,6 @@ import os
 import threading
 import wave
 import tempfile
-import subprocess
 from pynput import keyboard
 import time
 
@@ -38,10 +37,12 @@ except ImportError as e:
 
 
 class WhisperDictationApp:
-    def __init__(self):
+    def __init__(self, silent=False):
         # Configuration
         self.model_size = "base"  # tiny, base, small, medium, large
         self.sample_rate = 16000
+        self.silent = silent
+
         # State variables
         self.recording = False
         self.audio_data = []
@@ -52,7 +53,8 @@ class WhisperDictationApp:
         self.listener = None
 
         # Setup
-        self._check_permissions()
+        if not silent:
+            self._check_permissions()
         self._initialize_whisper()
 
     def _check_permissions(self):
@@ -70,7 +72,8 @@ class WhisperDictationApp:
 
     def _initialize_whisper(self):
         """Initialize the Whisper model"""
-        print(f"Loading Whisper {self.model_size} model...")
+        if not self.silent:
+            print(f"Loading Whisper {self.model_size} model...")
         try:
             # Use CPU by default, change to "cuda" if you have compatible GPU
             self.model = WhisperModel(
@@ -78,10 +81,12 @@ class WhisperDictationApp:
                 device="cpu",
                 compute_type="int8",  # Quantization for better CPU performance
             )
-            print("✓ Whisper model loaded successfully")
+            if not self.silent:
+                print("✓ Whisper model loaded successfully")
         except Exception as e:
-            print(f"✗ Failed to load Whisper model: {e}")
-            sys.exit(1)
+            if not self.silent:
+                print(f"✗ Failed to load Whisper model: {e}")
+            raise
 
     def _record_audio_callback(self, indata, frames, time, status):
         """Callback for audio recording"""
@@ -99,8 +104,9 @@ class WhisperDictationApp:
         if self.recording:
             return
 
-        print("\n🎙️  Recording started - speak now...")
-        print("   (Press Cmd+Shift+S again to stop)")
+        if not self.silent:
+            print("\n🎙️  Recording started - speak now...")
+            print("   (Press Cmd+Shift+S again to stop)")
 
         self.recording = True
         self.audio_data = []
@@ -115,7 +121,8 @@ class WhisperDictationApp:
             self.stream.start()
 
         except Exception as e:
-            print(f"✗ Failed to start recording: {e}")
+            if not self.silent:
+                print(f"✗ Failed to start recording: {e}")
             self.recording = False
 
     def stop_recording(self):
@@ -131,10 +138,12 @@ class WhisperDictationApp:
             self.stream = None
 
         if len(self.audio_data) == 0:
-            print("\nNo audio recorded")
+            if not self.silent:
+                print("\nNo audio recorded")
             return
 
-        print("\n🔄 Processing audio...")
+        if not self.silent:
+            print("\n🔄 Processing audio...")
 
         # Combine audio data
         audio_array = np.concatenate(self.audio_data)
@@ -145,7 +154,8 @@ class WhisperDictationApp:
 
             # Transcribe with Whisper
             try:
-                print("🤖 Transcribing with Whisper...")
+                if not self.silent:
+                    print("🤖 Transcribing with Whisper...")
                 segments, info = self.model.transcribe(tmp_file.name)
 
                 # Extract text
@@ -154,13 +164,16 @@ class WhisperDictationApp:
                     text += segment.text
 
                 if text.strip():
-                    print(f"📝 Transcribed: {text.strip()}")
+                    if not self.silent:
+                        print(f"📝 Transcribed: {text.strip()}")
                     self._insert_text(text.strip())
                 else:
-                    print("🤷 No speech detected in audio")
+                    if not self.silent:
+                        print("🤷 No speech detected in audio")
 
             except Exception as e:
-                print(f"✗ Transcription failed: {e}")
+                if not self.silent:
+                    print(f"✗ Transcription failed: {e}")
             finally:
                 # Clean up temp file
                 os.unlink(tmp_file.name)
@@ -183,20 +196,29 @@ class WhisperDictationApp:
             original_clipboard = pyperclip.paste()  # Backup current clipboard
             pyperclip.copy(text)
 
-            # Use AppleScript for more reliable pasting on macOS
-            applescript = (
-                'tell application "System Events" to keystroke "v" using command down'
-            )
-            subprocess.run(["osascript", "-e", applescript], check=True)
+            # Use pynput.keyboard to paste (more reliable than osascript for LaunchAgent)
+            from pynput.keyboard import Controller, Key
+
+            kbd = Controller()
+
+            # Small delay to ensure clipboard is ready
+            time.sleep(0.1)
+
+            # Press Cmd+V to paste
+            with kbd.pressed(Key.cmd):
+                kbd.press("v")
+                kbd.release("v")
 
             # Restore original clipboard after a short delay
             threading.Timer(1.0, lambda: pyperclip.copy(original_clipboard)).start()
 
-            print("✅ Text inserted successfully")
+            if not self.silent:
+                print("✅ Text inserted successfully")
 
         except Exception as e:
-            print(f"✗ Failed to insert text: {e}")
-            print(f"📋 Text copied to clipboard: {text}")
+            if not self.silent:
+                print(f"✗ Failed to insert text: {e}")
+                print(f"📋 Text copied to clipboard: {text}")
 
     def _on_hotkey_pressed(self):
         """Handle hotkey press"""
@@ -208,10 +230,11 @@ class WhisperDictationApp:
 
     def start_listening(self):
         """Start listening for double-tap of right Option key to record"""
-        print("🎧 Listening for right Option key double-tap to start recording...")
-        print("🔁 Double-tap → start recording")
-        print("⏹️  Single tap (while recording) → stop recording")
-        print("🛑 Ctrl+C to quit")
+        if not self.silent:
+            print("🎧 Listening for right Option key double-tap to start recording...")
+            print("🔁 Double-tap → start recording")
+            print("⏹️  Single tap (while recording) → stop recording")
+            print("🛑 Ctrl+C to quit")
 
         last_tap_time = [0]
         tap_threshold = 0.5  # seconds between taps to count as a double tap
@@ -224,18 +247,21 @@ class WhisperDictationApp:
 
                     if not self.recording and time_since_last < tap_threshold:
                         # Double-tap detected → start recording
-                        print("\n🎙️ Double-tap detected → start recording")
+                        if not self.silent:
+                            print("\n🎙️ Double-tap detected → start recording")
                         threading.Thread(
                             target=self.start_recording, daemon=True
                         ).start()
                     elif self.recording:
                         # Single tap while recording → stop
-                        print("\n⏹️ Single tap detected → stop recording")
+                        if not self.silent:
+                            print("\n⏹️ Single tap detected → stop recording")
                         self.stop_recording()
 
                     last_tap_time[0] = now
             except Exception as e:
-                print(f"⚠️ Listener error: {e}")
+                if not self.silent:
+                    print(f"⚠️ Listener error: {e}")
 
         with keyboard.Listener(on_press=on_press) as listener:
             self.listener = listener
