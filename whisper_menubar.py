@@ -16,7 +16,7 @@ class WhisperMenuBarApp(rumps.App):
             "Whisper",  # App name
             quit_button="Quit",
         )
-        self.title = "🎤"  # Set menubar title
+        self.title = "💬"  # Set menubar title
 
         # Initialize whisper app
         self.whisper_app = None
@@ -79,7 +79,7 @@ class WhisperMenuBarApp(rumps.App):
             self.is_recording = False
             self.record_button.title = "Start Recording (⌥⌥)"
             self.status_item.title = "Status: Processing..."
-            self.title = "🎤"
+            self.title = "💬"
         else:
             threading.Thread(
                 target=self.whisper_app.start_recording, daemon=True

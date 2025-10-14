@@ -20,7 +20,6 @@ import os
 import threading
 import wave
 import tempfile
-from pynput import keyboard
 import time
 
 # Third-party imports
@@ -39,7 +38,7 @@ except ImportError as e:
 class WhisperDictationApp:
     def __init__(self, silent=False):
         # Configuration
-        self.model_size = "base"  # tiny, base, small, medium, large
+        self.model_size = "small"  # tiny, base, small, medium, large
         self.sample_rate = 16000
         self.silent = silent
 
