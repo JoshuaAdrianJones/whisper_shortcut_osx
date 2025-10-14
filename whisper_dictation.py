@@ -21,6 +21,8 @@ import threading
 import wave
 import tempfile
 import subprocess
+from pynput import keyboard
+import time
 
 # Third-party imports
 try:
@@ -38,9 +40,8 @@ except ImportError as e:
 class WhisperDictationApp:
     def __init__(self):
         # Configuration
-        self.model_size = "small"  # tiny, base, small, medium, large
+        self.model_size = "base"  # tiny, base, small, medium, large
         self.sample_rate = 16000
-
         # State variables
         self.recording = False
         self.audio_data = []
@@ -206,16 +207,37 @@ class WhisperDictationApp:
             threading.Thread(target=self.start_recording, daemon=True).start()
 
     def start_listening(self):
-        """Start listening for keyboard shortcuts"""
-        print("🎧 Starting keyboard shortcut listener...")
-        print("📋 Hotkey: Cmd+Shift+S (⌘⇧A)")
-        print("🎙️  Press to start/stop recording")
-        print("🛑 Press Ctrl+C to quit")
+        """Start listening for double-tap of right Option key to record"""
+        print("🎧 Listening for right Option key double-tap to start recording...")
+        print("🔁 Double-tap → start recording")
+        print("⏹️  Single tap (while recording) → stop recording")
+        print("🛑 Ctrl+C to quit")
 
-        # Use global hotkey detection
-        with keyboard.GlobalHotKeys(
-            {"<cmd>+<shift>+s": self._on_hotkey_pressed}
-        ) as listener:
+        last_tap_time = [0]
+        tap_threshold = 0.5  # seconds between taps to count as a double tap
+
+        def on_press(key):
+            try:
+                if key == keyboard.Key.alt_r:  # right Option key
+                    now = time.time()
+                    time_since_last = now - last_tap_time[0]
+
+                    if not self.recording and time_since_last < tap_threshold:
+                        # Double-tap detected → start recording
+                        print("\n🎙️ Double-tap detected → start recording")
+                        threading.Thread(
+                            target=self.start_recording, daemon=True
+                        ).start()
+                    elif self.recording:
+                        # Single tap while recording → stop
+                        print("\n⏹️ Single tap detected → stop recording")
+                        self.stop_recording()
+
+                    last_tap_time[0] = now
+            except Exception as e:
+                print(f"⚠️ Listener error: {e}")
+
+        with keyboard.Listener(on_press=on_press) as listener:
             self.listener = listener
             try:
                 listener.join()
