@@ -7,9 +7,8 @@ A local speech-to-text application that uses Whisper AI with keyboard shortcuts.
 import sys
 import os
 import threading
-import wave
-import tempfile
 import time
+import plistlib
 
 # Third-party imports
 try:
@@ -35,10 +34,17 @@ class WhisperDictationApp:
         # Configuration
         self.model_size = "small"  # tiny, base, small, medium, large
         self.sample_rate = 16000
+        self.chunk_interval = 3  # seconds between streaming transcriptions
+        self.overlap_seconds = 1  # overlap between chunks for context
 
         # State variables
         self.recording = False
         self.audio_data = []
+        self._audio_lock = threading.Lock()
+        self._transcribed_samples = 0
+        self._stop_event = threading.Event()
+        self._streaming_done = threading.Event()
+        self._original_clipboard = None
 
         # Initialize components
         self.model = None
@@ -59,19 +65,29 @@ class WhisperDictationApp:
         except Exception as e:
             raise Exception(f"Failed to load Whisper model: {e}")
 
-    def _record_audio_callback(self, indata, frames, time, status):
+    def _record_audio_callback(self, indata, frames, time_info, status):
         """Callback for audio recording"""
         if not self.recording:
             return
-        self.audio_data.append(indata[:, 0].copy())
+        with self._audio_lock:
+            self.audio_data.append(indata[:, 0].copy())
 
     def start_recording(self):
-        """Start audio recording"""
+        """Start audio recording with streaming transcription"""
         if self.recording:
             return
 
         self.recording = True
         self.audio_data = []
+        self._transcribed_samples = 0
+        self._stop_event.clear()
+        self._streaming_done.clear()
+
+        # Save clipboard once at the start of recording
+        try:
+            self._original_clipboard = pyperclip.paste()
+        except Exception:
+            self._original_clipboard = None
 
         try:
             self.stream = sd.InputStream(
@@ -81,11 +97,74 @@ class WhisperDictationApp:
                 callback=self._record_audio_callback,
             )
             self.stream.start()
+
+            # Start streaming transcription thread
+            threading.Thread(
+                target=self._streaming_transcribe_loop, daemon=True
+            ).start()
         except Exception:
             self.recording = False
 
+    def _streaming_transcribe_loop(self):
+        """Background thread that transcribes audio chunks while recording"""
+        overlap_samples = int(self.overlap_seconds * self.sample_rate)
+
+        while not self._stop_event.is_set():
+            self._stop_event.wait(timeout=self.chunk_interval)
+            self._transcribe_new_audio(overlap_samples)
+
+        # Final transcription of any remaining audio
+        self._transcribe_new_audio(overlap_samples)
+        self._streaming_done.set()
+
+    def _transcribe_new_audio(self, overlap_samples):
+        """Transcribe audio that hasn't been processed yet"""
+        with self._audio_lock:
+            if len(self.audio_data) == 0:
+                return
+            audio_array = np.concatenate(self.audio_data)
+
+        total_samples = len(audio_array)
+
+        # Start from overlap before the last transcribed position for context
+        start = max(0, self._transcribed_samples - overlap_samples)
+
+        if total_samples <= start:
+            return
+
+        chunk = audio_array[start:]
+
+        # Need a minimum amount of audio to transcribe (~0.5s)
+        min_samples = int(0.5 * self.sample_rate)
+        if len(chunk) < min_samples:
+            return
+
+        try:
+            segments, _ = self.model.transcribe(chunk, vad_filter=True)
+            text = "".join(segment.text for segment in segments)
+
+            if text.strip():
+                self._paste_text(text.strip())
+
+            self._transcribed_samples = total_samples
+        except Exception:
+            pass
+
+    def _paste_text(self, text):
+        """Paste text at cursor position without saving/restoring clipboard"""
+        try:
+            pyperclip.copy(text)
+            kbd = Controller()
+            time.sleep(0.1)
+            with kbd.pressed(Key.cmd):
+                kbd.press("v")
+                kbd.release("v")
+            time.sleep(0.05)
+        except Exception:
+            pass
+
     def stop_recording(self):
-        """Stop audio recording and process"""
+        """Stop audio recording and finalize transcription"""
         if not self.recording:
             return
 
@@ -96,61 +175,18 @@ class WhisperDictationApp:
             self.stream.close()
             self.stream = None
 
-        if len(self.audio_data) == 0:
-            return
+        # Signal the streaming thread to do its final pass and wait
+        self._stop_event.set()
+        self._streaming_done.wait(timeout=30)
 
-        # Combine audio data
-        audio_array = np.concatenate(self.audio_data)
-
-        # Save to temporary file and transcribe
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-            self._save_audio_to_file(audio_array, tmp_file.name)
-
+        # Restore original clipboard
+        if self._original_clipboard is not None:
             try:
-                segments, info = self.model.transcribe(tmp_file.name)
-
-                # Extract text
-                text = ""
-                for segment in segments:
-                    text += segment.text
-
-                if text.strip():
-                    self._insert_text(text.strip())
-
+                threading.Timer(
+                    1.0, lambda: pyperclip.copy(self._original_clipboard)
+                ).start()
             except Exception:
                 pass
-            finally:
-                os.unlink(tmp_file.name)
-
-    def _save_audio_to_file(self, audio_data, filename):
-        """Save audio data to WAV file"""
-        audio_int16 = (audio_data * 32767).astype(np.int16)
-
-        with wave.open(filename, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(self.sample_rate)
-            wf.writeframes(audio_int16.tobytes())
-
-    def _insert_text(self, text):
-        """Insert text at cursor position using clipboard"""
-        try:
-            original_clipboard = pyperclip.paste()
-            pyperclip.copy(text)
-
-            kbd = Controller()
-            time.sleep(0.1)
-
-            # Press Cmd+V to paste
-            with kbd.pressed(Key.cmd):
-                kbd.press("v")
-                kbd.release("v")
-
-            # Restore original clipboard after delay
-            threading.Timer(1.0, lambda: pyperclip.copy(original_clipboard)).start()
-
-        except Exception:
-            pass
 
     def start_listening(self):
         """Start listening for double-tap of right Option key"""
@@ -189,6 +225,12 @@ class WhisperDictationApp:
             self.listener.stop()
 
 
+LAUNCHAGENT_LABEL = "com.whisper.dictation"
+LAUNCHAGENT_PATH = os.path.expanduser(
+    f"~/Library/LaunchAgents/{LAUNCHAGENT_LABEL}.plist"
+)
+
+
 class WhisperMenuBarApp(rumps.App):
     """Menubar interface for Whisper Dictation"""
 
@@ -209,10 +251,17 @@ class WhisperMenuBarApp(rumps.App):
         self.record_button = rumps.MenuItem(
             "Start Recording (⌥⌥)", callback=self.toggle_recording
         )
+        self.login_item = rumps.MenuItem(
+            "Start at Login", callback=self.toggle_start_at_login
+        )
+        self.login_item.state = os.path.exists(LAUNCHAGENT_PATH)
+
         self.menu = [
             self.status_item,
             None,
             self.record_button,
+            None,
+            self.login_item,
             None,
             "About",
         ]
@@ -255,10 +304,11 @@ class WhisperMenuBarApp(rumps.App):
             return
 
         if self.is_recording:
+            self.status_item.title = "Status: Finishing..."
             self.whisper_app.stop_recording()
             self.is_recording = False
             self.record_button.title = "Start Recording (⌥⌥)"
-            self.status_item.title = "Status: Processing..."
+            self.status_item.title = "Status: Ready"
             self.title = "💬"
         else:
             threading.Thread(
@@ -266,14 +316,33 @@ class WhisperMenuBarApp(rumps.App):
             ).start()
             self.is_recording = True
             self.record_button.title = "Stop Recording (⌥)"
-            self.status_item.title = "Status: Recording..."
+            self.status_item.title = "Status: Recording & Transcribing..."
             self.title = "🔴"
-            threading.Timer(
-                1.0,
-                lambda: setattr(self.status_item, "title", "Status: Ready")
-                if not self.is_recording
-                else None,
-            ).start()
+
+    def toggle_start_at_login(self, sender):
+        """Toggle auto-start at login via LaunchAgent"""
+        if sender.state:
+            # Currently enabled — remove the plist
+            try:
+                os.unlink(LAUNCHAGENT_PATH)
+            except OSError:
+                pass
+            sender.state = False
+        else:
+            # Currently disabled — write the plist
+            plist = {
+                "Label": LAUNCHAGENT_LABEL,
+                "ProgramArguments": [
+                    sys.executable,
+                    os.path.abspath(__file__),
+                ],
+                "RunAtLoad": True,
+                "KeepAlive": False,
+            }
+            os.makedirs(os.path.dirname(LAUNCHAGENT_PATH), exist_ok=True)
+            with open(LAUNCHAGENT_PATH, "wb") as f:
+                plistlib.dump(plist, f)
+            sender.state = True
 
     @rumps.clicked("About")
     def about(self, _):
