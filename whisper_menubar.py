@@ -12,13 +12,22 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, assert_never
 
 from whisper_core import (
+    DoTranscription,
+    IgnoreKeyPress,
+    RecorderEvent,
+    RecordingError,
+    RecordingStarted,
+    RecordingStopped,
+    SkipTranscription,
+    StartRecording,
+    StopRecording,
+    WhisperSegment,
     build_launchagent_plist,
     classify_key_event,
     join_new_segments,
-    parse_recorder_event,
     plan_transcription_window,
 )
 
@@ -75,8 +84,7 @@ class WhisperDictationApp:
         self._original_clipboard: str | None = None
         self._stop_worker_thread: threading.Thread | None = None
 
-        # Invoked on state transitions: "started", "stopped", "error:<msg>"
-        self.state_callback: Any = None
+        self.state_callback: Any = None  # Callable[[RecorderEvent], None] | None
 
         # Initialize components
         self.stream: sd.InputStream | None = None
@@ -85,7 +93,7 @@ class WhisperDictationApp:
         # Setup
         self._initialize_whisper()
 
-    def _emit(self, event: str) -> None:
+    def _emit(self, event: RecorderEvent) -> None:
         cb = self.state_callback
         if cb is None:
             return
@@ -148,13 +156,13 @@ class WhisperDictationApp:
             self.stream.start()
 
             threading.Thread(target=self._streaming_transcribe_loop, daemon=True).start()
-            self._emit("started")
+            self._emit(RecordingStarted())
         except Exception as e:
             logger.exception("failed to start input stream")
             self.recording = False
             self.stream = None
             self._streaming_done.set()
-            self._emit(f"error:{e}")
+            self._emit(RecordingError(message=str(e)))
 
     def _streaming_transcribe_loop(self) -> None:
         """Background thread that transcribes audio chunks while recording"""
@@ -188,28 +196,32 @@ class WhisperDictationApp:
             min_samples=min_samples,
         )
 
-        if not plan.should_transcribe:
-            return
+        match plan:
+            case SkipTranscription():
+                return
+            case DoTranscription():
+                chunk = audio_array[plan.start_idx :]
+                try:
+                    result = mlx_whisper.transcribe(chunk, path_or_hf_repo=self.model_repo)
+                    raw_segments = result.get("segments", [])
+                    segments = [WhisperSegment.from_dict(s) for s in raw_segments]
+                    new_text = join_new_segments(segments, plan.overlap_in_chunk_seconds)
 
-        chunk = audio_array[plan.start_idx :]
+                    if new_text.strip():
+                        self._paste_text(new_text.strip())
 
-        try:
-            result = mlx_whisper.transcribe(chunk, path_or_hf_repo=self.model_repo)
-            new_text = join_new_segments(result.get("segments", []), plan.overlap_in_chunk_seconds)
+                    self._transcribed_samples = plan.new_transcribed_samples
+                    tail = audio_array[plan.keep_from_idx :]
 
-            if new_text.strip():
-                self._paste_text(new_text.strip())
-
-            self._transcribed_samples = plan.new_transcribed_samples
-            tail = audio_array[plan.keep_from_idx :]
-
-            with self._audio_lock:
-                # Preserve any frames the callback appended during transcription.
-                new_entries = self.audio_data[len(snapshot) :]
-                self.audio_data = [tail] + new_entries
-                self._committed_offset = plan.new_committed_offset
-        except Exception:
-            logger.exception("transcription failed")
+                    with self._audio_lock:
+                        # Preserve any frames the callback appended during transcription.
+                        new_entries = self.audio_data[len(snapshot) :]
+                        self.audio_data = [tail] + new_entries
+                        self._committed_offset = plan.new_committed_offset
+                except Exception:
+                    logger.exception("transcription failed")
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def _paste_text(self, text: str) -> None:
         """Paste text at cursor position without saving/restoring clipboard"""
@@ -256,7 +268,7 @@ class WhisperDictationApp:
                 except Exception:
                     logger.exception("clipboard restore failed")
         finally:
-            self._emit("stopped")
+            self._emit(RecordingStopped())
 
     def start_listening(self) -> None:
         """Start listening for double-tap of right Option key"""
@@ -272,10 +284,15 @@ class WhisperDictationApp:
                         time_since_last=now - last_tap_time[0],
                         tap_threshold=tap_threshold,
                     )
-                    if action == "start":
-                        threading.Thread(target=self.start_recording, daemon=True).start()
-                    elif action == "stop":
-                        self.stop_recording()
+                    match action:
+                        case StartRecording():
+                            threading.Thread(target=self.start_recording, daemon=True).start()
+                        case StopRecording():
+                            self.stop_recording()
+                        case IgnoreKeyPress():
+                            pass
+                        case _ as unreachable:
+                            assert_never(unreachable)
                     last_tap_time[0] = now
             except Exception:
                 logger.exception("hotkey handler failed")
@@ -374,19 +391,31 @@ class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
         if self.whisper_app:
             self.whisper_app.start_listening()
 
-    def _on_recorder_state(self, event: str) -> None:
+    def _on_recorder_state(self, event: RecorderEvent) -> None:
         """State callback from WhisperDictationApp — drives menubar UI."""
-        state = parse_recorder_event(event)
-        self.is_recording = state.is_recording
-        self.record_button.title = state.record_button_title
-        self.status_item.title = state.status_title
-        self.title = state.menubar_title
-        if state.notification_message is not None:
-            rumps.notification(
-                title="Whisper Dictation",
-                subtitle="Recording failed",
-                message=state.notification_message,
-            )
+        match event:
+            case RecordingStarted():
+                self.is_recording = True
+                self.title = "🔴"
+                self.status_item.title = "Status: Recording & Transcribing..."
+                self.record_button.title = "Stop Recording (⌥)"
+            case RecordingStopped():
+                self.is_recording = False
+                self.title = "💬"
+                self.status_item.title = "Status: Ready"
+                self.record_button.title = "Start Recording (⌥⌥)"
+            case RecordingError(message=msg):
+                self.is_recording = False
+                self.title = "💬"
+                self.status_item.title = "Status: Ready"
+                self.record_button.title = "Start Recording (⌥⌥)"
+                rumps.notification(
+                    title="Whisper Dictation",
+                    subtitle="Recording failed",
+                    message=msg,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def toggle_recording(self, _: Any) -> None:
         """Toggle recording; UI state is driven by the recorder callback."""

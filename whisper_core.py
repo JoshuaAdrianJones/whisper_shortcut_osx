@@ -4,16 +4,33 @@ No I/O, no model, no audio, no clipboard — plain data in, plain data out.
 """
 
 from dataclasses import dataclass
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# TranscriptionOutcome  (was: TranscriptionPlan with boolean mode flag)
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class TranscriptionPlan:
-    should_transcribe: bool
+class SkipTranscription:
+    """No new audio to process; caller should not call mlx_whisper."""
+
+    new_transcribed_samples: int
+    new_committed_offset: int
+
+
+@dataclass(frozen=True)
+class DoTranscription:
+    """Caller should slice audio[start_idx:] and pass to mlx_whisper."""
+
     start_idx: int
     overlap_in_chunk_seconds: float
     new_transcribed_samples: int
     keep_from_idx: int
     new_committed_offset: int
+
+
+TranscriptionOutcome = SkipTranscription | DoTranscription
 
 
 def plan_transcription_window(
@@ -24,7 +41,7 @@ def plan_transcription_window(
     overlap_samples: int,
     sample_rate: int,
     min_samples: int,
-) -> TranscriptionPlan:
+) -> TranscriptionOutcome:
     """Compute slice indices and overlap metadata for the next transcription pass.
 
     Args:
@@ -37,8 +54,8 @@ def plan_transcription_window(
         min_samples: Minimum chunk length required to attempt transcription.
 
     Returns:
-        TranscriptionPlan — if ``should_transcribe`` is False, all other fields are
-        zero/default and the caller should skip this pass.
+        SkipTranscription if there is nothing new to process; DoTranscription
+        with slice indices and overlap metadata otherwise.
     """
     start_abs = max(committed_offset, transcribed_samples - overlap_samples)
     start_idx = start_abs - committed_offset
@@ -46,12 +63,8 @@ def plan_transcription_window(
     chunk_len = snapshot_len - start_idx
 
     if total_absolute <= start_abs or chunk_len < min_samples:
-        return TranscriptionPlan(
-            should_transcribe=False,
-            start_idx=0,
-            overlap_in_chunk_seconds=0.0,
+        return SkipTranscription(
             new_transcribed_samples=transcribed_samples,
-            keep_from_idx=0,
             new_committed_offset=committed_offset,
         )
 
@@ -60,8 +73,7 @@ def plan_transcription_window(
     keep_from_abs = max(committed_offset, new_transcribed_samples - overlap_samples)
     keep_from_idx = keep_from_abs - committed_offset
 
-    return TranscriptionPlan(
-        should_transcribe=True,
+    return DoTranscription(
         start_idx=start_idx,
         overlap_in_chunk_seconds=overlap_in_chunk_seconds,
         new_transcribed_samples=new_transcribed_samples,
@@ -71,64 +83,54 @@ def plan_transcription_window(
 
 
 # ---------------------------------------------------------------------------
-# Target 1: recorder event → UI state
+# RecorderEvent  (was: string discriminator "started"/"stopped"/"error:<msg>")
 # ---------------------------------------------------------------------------
-
-_IDLE_BUTTON = "Start Recording (⌥⌥)"
-_RECORDING_BUTTON = "Stop Recording (⌥)"
 
 
 @dataclass(frozen=True)
-class RecorderUIState:
-    is_recording: bool
-    menubar_title: str
-    status_title: str
-    record_button_title: str
-    notification_message: str | None  # None → no notification
+class RecordingStarted:
+    pass
 
 
-def parse_recorder_event(event: str) -> RecorderUIState:
-    """Map a recorder event string to a UI update descriptor.
+@dataclass(frozen=True)
+class RecordingStopped:
+    pass
 
-    Args:
-        event: One of ``"started"``, ``"stopped"``, or ``"error:<message>"``.
 
-    Returns:
-        RecorderUIState with all fields needed to update the menubar UI.
-    """
-    if event == "started":
-        return RecorderUIState(
-            is_recording=True,
-            menubar_title="🔴",
-            status_title="Status: Recording & Transcribing...",
-            record_button_title=_RECORDING_BUTTON,
-            notification_message=None,
-        )
-    if event == "stopped":
-        return RecorderUIState(
-            is_recording=False,
-            menubar_title="💬",
-            status_title="Status: Ready",
-            record_button_title=_IDLE_BUTTON,
-            notification_message=None,
-        )
-    # error:<message>
-    message = event[len("error:") :]
-    return RecorderUIState(
-        is_recording=False,
-        menubar_title="💬",
-        status_title="Status: Ready",
-        record_button_title=_IDLE_BUTTON,
-        notification_message=message,
-    )
+@dataclass(frozen=True)
+class RecordingError:
+    message: str
+
+
+RecorderEvent = RecordingStarted | RecordingStopped | RecordingError
 
 
 # ---------------------------------------------------------------------------
-# Target 2: double-tap detection
+# KeyAction  (was: classify_key_event returning bare strings)
 # ---------------------------------------------------------------------------
 
 
-def classify_key_event(is_recording: bool, time_since_last: float, tap_threshold: float) -> str:
+@dataclass(frozen=True)
+class StartRecording:
+    pass
+
+
+@dataclass(frozen=True)
+class StopRecording:
+    pass
+
+
+@dataclass(frozen=True)
+class IgnoreKeyPress:
+    pass
+
+
+KeyAction = StartRecording | StopRecording | IgnoreKeyPress
+
+
+def classify_key_event(
+    is_recording: bool, time_since_last: float, tap_threshold: float
+) -> KeyAction:
     """Determine the action for a hotkey press.
 
     Args:
@@ -138,28 +140,40 @@ def classify_key_event(is_recording: bool, time_since_last: float, tap_threshold
             double-tap.
 
     Returns:
-        ``"start"`` — begin recording (double-tap while idle).
-        ``"stop"``  — end recording (any tap while recording).
-        ``"ignore"`` — first tap while idle; wait for potential second tap.
+        StartRecording — begin recording (double-tap while idle).
+        StopRecording  — end recording (any tap while recording).
+        IgnoreKeyPress — first tap while idle; wait for potential second tap.
     """
     if is_recording:
-        return "stop"
+        return StopRecording()
     if time_since_last < tap_threshold:
-        return "start"
-    return "ignore"
+        return StartRecording()
+    return IgnoreKeyPress()
 
 
 # ---------------------------------------------------------------------------
-# Target 3: segment filter + text join
+# WhisperSegment  (was: list[dict] with untyped "start"/"text" access)
 # ---------------------------------------------------------------------------
 
 
-def join_new_segments(segments: list[dict], overlap_in_chunk_seconds: float) -> str:  # type: ignore[type-arg]
+@dataclass(frozen=True)
+class WhisperSegment:
+    start: float
+    text: str
+
+    @staticmethod
+    def from_dict(d: dict[str, object]) -> "WhisperSegment":
+        return WhisperSegment(
+            start=float(d["start"]),  # type: ignore[arg-type]
+            text=str(d["text"]),
+        )
+
+
+def join_new_segments(segments: list[WhisperSegment], overlap_in_chunk_seconds: float) -> str:
     """Extract and join text from segments that fall after the overlap window.
 
     Args:
-        segments: Whisper result segments, each with ``"start"`` (float) and
-            ``"text"`` (str) keys.
+        segments: Whisper result segments.
         overlap_in_chunk_seconds: Seconds of already-emitted audio re-fed to
             Whisper for context. Segments whose ``start`` is within the overlap
             (with a 50 ms tolerance) are skipped.
@@ -168,15 +182,15 @@ def join_new_segments(segments: list[dict], overlap_in_chunk_seconds: float) -> 
         Concatenated text of qualifying segments.
     """
     threshold = overlap_in_chunk_seconds - 0.05
-    return "".join(seg["text"] for seg in segments if seg["start"] >= threshold)
+    return "".join(seg.text for seg in segments if seg.start >= threshold)
 
 
 # ---------------------------------------------------------------------------
-# Target 4: LaunchAgent plist construction
+# LaunchAgent plist construction
 # ---------------------------------------------------------------------------
 
 
-def build_launchagent_plist(label: str, executable: str, script_path: str) -> dict:  # type: ignore[type-arg]
+def build_launchagent_plist(label: str, executable: str, script_path: str) -> dict[str, Any]:
     """Build the LaunchAgent plist dictionary.
 
     Args:

@@ -1,8 +1,13 @@
 from whisper_core import (
+    DoTranscription,
+    IgnoreKeyPress,
+    SkipTranscription,
+    StartRecording,
+    StopRecording,
+    WhisperSegment,
     build_launchagent_plist,
     classify_key_event,
     join_new_segments,
-    parse_recorder_event,
     plan_transcription_window,
 )
 
@@ -16,7 +21,7 @@ def test_given_fresh_buffer_starts_at_zero_with_no_overlap() -> None:
         sample_rate=16000,
         min_samples=8000,
     )
-    assert plan.should_transcribe is True
+    assert isinstance(plan, DoTranscription)
     assert plan.start_idx == 0
     assert plan.overlap_in_chunk_seconds == 0.0
     assert plan.new_transcribed_samples == 32000
@@ -33,7 +38,7 @@ def test_given_chunk_smaller_than_min_samples_skips() -> None:
         sample_rate=16000,
         min_samples=8000,
     )
-    assert plan.should_transcribe is False
+    assert isinstance(plan, SkipTranscription)
 
 
 def test_given_prior_transcription_rewinds_by_overlap() -> None:
@@ -45,6 +50,7 @@ def test_given_prior_transcription_rewinds_by_overlap() -> None:
         sample_rate=16000,
         min_samples=8000,
     )
+    assert isinstance(plan, DoTranscription)
     assert plan.start_idx == 32000  # 48000 - 16000
     assert plan.overlap_in_chunk_seconds == 1.0  # the rewound second
     assert plan.new_transcribed_samples == 64000
@@ -60,7 +66,7 @@ def test_skip_when_no_new_audio_past_committed() -> None:
         sample_rate=16000,
         min_samples=8000,
     )
-    assert plan.should_transcribe is False
+    assert isinstance(plan, SkipTranscription)
     assert plan.new_committed_offset == 32000
     assert plan.new_transcribed_samples == 32000
 
@@ -75,7 +81,7 @@ def test_committed_offset_shifts_indices() -> None:
         sample_rate=16000,
         min_samples=8000,
     )
-    assert plan.should_transcribe is True
+    assert isinstance(plan, DoTranscription)
     assert plan.start_idx == 0  # start_abs == committed_offset, so idx=0
     assert plan.overlap_in_chunk_seconds == 0.0
     assert plan.new_transcribed_samples == 48000
@@ -94,46 +100,9 @@ def test_overlap_capped_at_committed_offset() -> None:
         sample_rate=16000,
         min_samples=4000,
     )
-    assert plan.should_transcribe is True
+    assert isinstance(plan, DoTranscription)
     assert plan.start_idx == 0  # capped at committed_offset
     assert plan.overlap_in_chunk_seconds == 0.0
-
-
-# ---------------------------------------------------------------------------
-# parse_recorder_event
-# ---------------------------------------------------------------------------
-
-
-def test_given_started_event_returns_recording_state() -> None:
-    state = parse_recorder_event("started")
-    assert state.is_recording is True
-    assert state.menubar_title == "🔴"
-    assert state.status_title == "Status: Recording & Transcribing..."
-    assert state.record_button_title == "Stop Recording (⌥)"
-    assert state.notification_message is None
-
-
-def test_given_stopped_event_returns_idle_state() -> None:
-    state = parse_recorder_event("stopped")
-    assert state.is_recording is False
-    assert state.menubar_title == "💬"
-    assert state.status_title == "Status: Ready"
-    assert state.record_button_title == "Start Recording (⌥⌥)"
-    assert state.notification_message is None
-
-
-def test_given_error_event_returns_idle_state_with_notification() -> None:
-    state = parse_recorder_event("error:microphone busy")
-    assert state.is_recording is False
-    assert state.menubar_title == "💬"
-    assert state.status_title == "Status: Ready"
-    assert state.record_button_title == "Start Recording (⌥⌥)"
-    assert state.notification_message == "microphone busy"
-
-
-def test_given_error_event_with_colon_in_message_preserves_full_message() -> None:
-    state = parse_recorder_event("error:OSError: [Errno 16] Device busy")
-    assert state.notification_message == "OSError: [Errno 16] Device busy"
 
 
 # ---------------------------------------------------------------------------
@@ -143,28 +112,28 @@ def test_given_error_event_with_colon_in_message_preserves_full_message() -> Non
 
 def test_given_not_recording_and_quick_double_tap_returns_start() -> None:
     action = classify_key_event(is_recording=False, time_since_last=0.3, tap_threshold=0.5)
-    assert action == "start"
+    assert isinstance(action, StartRecording)
 
 
 def test_given_not_recording_and_slow_tap_returns_ignore() -> None:
     action = classify_key_event(is_recording=False, time_since_last=0.6, tap_threshold=0.5)
-    assert action == "ignore"
+    assert isinstance(action, IgnoreKeyPress)
 
 
 def test_given_recording_returns_stop_regardless_of_timing() -> None:
     action = classify_key_event(is_recording=True, time_since_last=0.1, tap_threshold=0.5)
-    assert action == "stop"
+    assert isinstance(action, StopRecording)
 
 
 def test_given_recording_slow_tap_still_returns_stop() -> None:
     action = classify_key_event(is_recording=True, time_since_last=5.0, tap_threshold=0.5)
-    assert action == "stop"
+    assert isinstance(action, StopRecording)
 
 
 def test_given_tap_exactly_at_threshold_returns_ignore() -> None:
     # time_since_last < tap_threshold is the condition, so equal means ignore
     action = classify_key_event(is_recording=False, time_since_last=0.5, tap_threshold=0.5)
-    assert action == "ignore"
+    assert isinstance(action, IgnoreKeyPress)
 
 
 # ---------------------------------------------------------------------------
@@ -174,8 +143,8 @@ def test_given_tap_exactly_at_threshold_returns_ignore() -> None:
 
 def test_given_no_overlap_returns_all_segment_text() -> None:
     segments = [
-        {"start": 0.0, "text": "Hello "},
-        {"start": 1.0, "text": "world"},
+        WhisperSegment(start=0.0, text="Hello "),
+        WhisperSegment(start=1.0, text="world"),
     ]
     result = join_new_segments(segments, overlap_in_chunk_seconds=0.0)
     assert result == "Hello world"
@@ -183,9 +152,9 @@ def test_given_no_overlap_returns_all_segment_text() -> None:
 
 def test_given_overlap_filters_segments_before_threshold() -> None:
     segments = [
-        {"start": 0.0, "text": "old "},
-        {"start": 0.5, "text": "also old "},
-        {"start": 1.0, "text": "new"},
+        WhisperSegment(start=0.0, text="old "),
+        WhisperSegment(start=0.5, text="also old "),
+        WhisperSegment(start=1.0, text="new"),
     ]
     # threshold = 1.0 - 0.05 = 0.95; segments at 0.0 and 0.5 are excluded
     result = join_new_segments(segments, overlap_in_chunk_seconds=1.0)
@@ -193,13 +162,13 @@ def test_given_overlap_filters_segments_before_threshold() -> None:
 
 
 def test_given_segment_just_above_threshold_is_included() -> None:
-    segments = [{"start": 0.96, "text": "yes"}]
+    segments = [WhisperSegment(start=0.96, text="yes")]
     result = join_new_segments(segments, overlap_in_chunk_seconds=1.0)
     assert result == "yes"
 
 
 def test_given_segment_just_below_threshold_is_excluded() -> None:
-    segments = [{"start": 0.94, "text": "no"}]
+    segments = [WhisperSegment(start=0.94, text="no")]
     result = join_new_segments(segments, overlap_in_chunk_seconds=1.0)
     assert result == ""
 
