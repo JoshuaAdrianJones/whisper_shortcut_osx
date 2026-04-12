@@ -16,14 +16,13 @@ A local speech-to-text application using OpenAI's Whisper model with keyboard sh
 
 ### 1. Install Python Dependencies
 
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
+
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
-Or install individually:
-```bash
-pip install faster-whisper pynput pyperclip sounddevice numpy rumps
-```
+Then run commands inside the project environment with `uv run` (e.g. `uv run python whisper_menubar.py`).
 
 ### 2. macOS Permissions Setup
 

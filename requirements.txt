@@ -1,7 +1,0 @@
-faster-whisper
-pynput
-pyperclip
-sounddevice
-webrtcvad
-numpy
-rumps
