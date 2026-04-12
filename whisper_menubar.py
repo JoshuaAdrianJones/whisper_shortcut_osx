@@ -7,13 +7,12 @@ Local speech-to-text using Whisper AI with keyboard shortcuts.
 import logging
 import logging.handlers
 import os
-import plistlib
-import subprocess
 import sys
 import threading
 import time
 from typing import Any, assert_never
 
+import launchagent
 from whisper_core import (
     DoTranscription,
     IgnoreKeyPress,
@@ -25,7 +24,6 @@ from whisper_core import (
     StartRecording,
     StopRecording,
     WhisperSegment,
-    build_launchagent_plist,
     classify_key_event,
     join_new_segments,
     plan_transcription_window,
@@ -185,7 +183,6 @@ class WhisperDictationApp:
             committed_offset = self._committed_offset
 
         audio_array = np.concatenate(snapshot)
-        min_samples = int(0.5 * self.sample_rate)
 
         plan = plan_transcription_window(
             committed_offset=committed_offset,
@@ -193,7 +190,6 @@ class WhisperDictationApp:
             snapshot_len=len(audio_array),
             overlap_samples=overlap_samples,
             sample_rate=self.sample_rate,
-            min_samples=min_samples,
         )
 
         match plan:
@@ -313,20 +309,6 @@ class WhisperDictationApp:
 
 
 LAUNCHAGENT_LABEL = "com.whisper.dictation"
-LAUNCHAGENT_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHAGENT_LABEL}.plist")
-
-
-def _launchagent_loaded() -> bool:
-    try:
-        proc = subprocess.run(
-            ["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHAGENT_LABEL}"],
-            capture_output=True,
-            timeout=5,
-        )
-        return proc.returncode == 0
-    except Exception:
-        logger.exception("launchctl print failed")
-        return False
 
 
 class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
@@ -348,7 +330,7 @@ class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
         self.status_item = rumps.MenuItem("Status: Ready", callback=None)
         self.record_button = rumps.MenuItem("Start Recording (⌥⌥)", callback=self.toggle_recording)
         self.login_item = rumps.MenuItem("Start at Login", callback=self.toggle_start_at_login)
-        self.login_item.state = _launchagent_loaded()
+        self.login_item.state = launchagent.is_active(LAUNCHAGENT_LABEL)
 
         self.menu = [
             self.status_item,
@@ -376,7 +358,7 @@ class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
                 subtitle="Ready to use",
                 message="Double-tap right Option (⌥) to start recording",
             )
-            threading.Thread(target=self._start_listening, daemon=True).start()
+            threading.Thread(target=self.whisper_app.start_listening, daemon=True).start()
         except Exception as e:
             logger.exception("whisper init failed")
             self.status_item.title = f"Status: Error - {str(e)[:30]}"
@@ -385,11 +367,6 @@ class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
                 subtitle="Initialization failed",
                 message=str(e),
             )
-
-    def _start_listening(self) -> None:
-        """Start the keyboard listener in background"""
-        if self.whisper_app:
-            self.whisper_app.start_listening()
 
     def _on_recorder_state(self, event: RecorderEvent) -> None:
         """State callback from WhisperDictationApp — drives menubar UI."""
@@ -436,51 +413,19 @@ class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
         Note: the plist pins the current Python interpreter and script path. If
         the venv or script moves, toggle this off and on again to refresh.
         """
-        uid = os.getuid()
-        if sender.state:
-            # Currently enabled — bootout and remove the plist
-            subprocess.run(
-                ["launchctl", "bootout", f"gui/{uid}/{LAUNCHAGENT_LABEL}"],
-                capture_output=True,
+        try:
+            if sender.state:
+                launchagent.uninstall(LAUNCHAGENT_LABEL)
+            else:
+                launchagent.install(LAUNCHAGENT_LABEL, sys.executable, os.path.abspath(__file__))
+        except Exception as e:
+            logger.exception("toggle_start_at_login failed")
+            rumps.notification(
+                title="Whisper Dictation",
+                subtitle="Start at Login failed",
+                message=str(e),
             )
-            try:
-                os.unlink(LAUNCHAGENT_PATH)
-            except OSError:
-                logger.exception("failed to remove LaunchAgent plist")
-        else:
-            plist = build_launchagent_plist(
-                label=LAUNCHAGENT_LABEL,
-                executable=sys.executable,
-                script_path=os.path.abspath(__file__),
-            )
-            os.makedirs(os.path.dirname(LAUNCHAGENT_PATH), exist_ok=True)
-            try:
-                with open(LAUNCHAGENT_PATH, "wb") as f:
-                    plistlib.dump(plist, f)
-            except Exception as e:
-                logger.exception("failed to write LaunchAgent plist")
-                rumps.notification(
-                    title="Whisper Dictation",
-                    subtitle="Start at Login failed",
-                    message=str(e),
-                )
-                sender.state = _launchagent_loaded()
-                return
-
-            proc = subprocess.run(
-                ["launchctl", "bootstrap", f"gui/{uid}", LAUNCHAGENT_PATH],
-                capture_output=True,
-            )
-            if proc.returncode != 0:
-                err = proc.stderr.decode(errors="replace").strip()
-                logger.error("launchctl bootstrap failed: %s", err)
-                rumps.notification(
-                    title="Whisper Dictation",
-                    subtitle="Start at Login failed",
-                    message=err or "launchctl bootstrap returned non-zero",
-                )
-
-        sender.state = _launchagent_loaded()
+        sender.state = launchagent.is_active(LAUNCHAGENT_LABEL)
 
     @rumps.clicked("About")  # type: ignore[untyped-decorator]
     def about(self, _: Any) -> None:

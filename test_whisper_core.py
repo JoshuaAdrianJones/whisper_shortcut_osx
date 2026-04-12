@@ -1,3 +1,4 @@
+from launchagent import build_launchagent_plist
 from whisper_core import (
     DoTranscription,
     IgnoreKeyPress,
@@ -5,7 +6,6 @@ from whisper_core import (
     StartRecording,
     StopRecording,
     WhisperSegment,
-    build_launchagent_plist,
     classify_key_event,
     join_new_segments,
     plan_transcription_window,
@@ -19,7 +19,6 @@ def test_given_fresh_buffer_starts_at_zero_with_no_overlap() -> None:
         snapshot_len=16000 * 2,  # 2s
         overlap_samples=16000,  # 1s
         sample_rate=16000,
-        min_samples=8000,
     )
     assert isinstance(plan, DoTranscription)
     assert plan.start_idx == 0
@@ -36,7 +35,6 @@ def test_given_chunk_smaller_than_min_samples_skips() -> None:
         snapshot_len=4000,
         overlap_samples=16000,
         sample_rate=16000,
-        min_samples=8000,
     )
     assert isinstance(plan, SkipTranscription)
 
@@ -48,7 +46,6 @@ def test_given_prior_transcription_rewinds_by_overlap() -> None:
         snapshot_len=64000,
         overlap_samples=16000,
         sample_rate=16000,
-        min_samples=8000,
     )
     assert isinstance(plan, DoTranscription)
     assert plan.start_idx == 32000  # 48000 - 16000
@@ -64,7 +61,6 @@ def test_skip_when_no_new_audio_past_committed() -> None:
         snapshot_len=0,
         overlap_samples=16000,
         sample_rate=16000,
-        min_samples=8000,
     )
     assert isinstance(plan, SkipTranscription)
     assert plan.new_committed_offset == 32000
@@ -79,7 +75,6 @@ def test_committed_offset_shifts_indices() -> None:
         snapshot_len=32000,  # 2s of audio in the buffer
         overlap_samples=16000,
         sample_rate=16000,
-        min_samples=8000,
     )
     assert isinstance(plan, DoTranscription)
     assert plan.start_idx == 0  # start_abs == committed_offset, so idx=0
@@ -98,7 +93,7 @@ def test_overlap_capped_at_committed_offset() -> None:
         snapshot_len=24000,
         overlap_samples=16000,  # would rewind to -8000 without cap
         sample_rate=16000,
-        min_samples=4000,
+        min_chunk_seconds=0.25,
     )
     assert isinstance(plan, DoTranscription)
     assert plan.start_idx == 0  # capped at committed_offset

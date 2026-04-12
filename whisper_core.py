@@ -4,7 +4,6 @@ No I/O, no model, no audio, no clipboard — plain data in, plain data out.
 """
 
 from dataclasses import dataclass
-from typing import Any
 
 # ---------------------------------------------------------------------------
 # TranscriptionOutcome  (was: TranscriptionPlan with boolean mode flag)
@@ -40,7 +39,7 @@ def plan_transcription_window(
     snapshot_len: int,
     overlap_samples: int,
     sample_rate: int,
-    min_samples: int,
+    min_chunk_seconds: float = 0.5,
 ) -> TranscriptionOutcome:
     """Compute slice indices and overlap metadata for the next transcription pass.
 
@@ -51,12 +50,13 @@ def plan_transcription_window(
         snapshot_len: Number of samples in the current buffer snapshot.
         overlap_samples: How many samples to rewind for Whisper context.
         sample_rate: Audio sample rate (Hz).
-        min_samples: Minimum chunk length required to attempt transcription.
+        min_chunk_seconds: Minimum chunk duration required to attempt transcription.
 
     Returns:
         SkipTranscription if there is nothing new to process; DoTranscription
         with slice indices and overlap metadata otherwise.
     """
+    min_samples = int(min_chunk_seconds * sample_rate)
     start_abs = max(committed_offset, transcribed_samples - overlap_samples)
     start_idx = start_abs - committed_offset
     total_absolute = committed_offset + snapshot_len
@@ -183,27 +183,3 @@ def join_new_segments(segments: list[WhisperSegment], overlap_in_chunk_seconds: 
     """
     threshold = overlap_in_chunk_seconds - 0.05
     return "".join(seg.text for seg in segments if seg.start >= threshold)
-
-
-# ---------------------------------------------------------------------------
-# LaunchAgent plist construction
-# ---------------------------------------------------------------------------
-
-
-def build_launchagent_plist(label: str, executable: str, script_path: str) -> dict[str, Any]:
-    """Build the LaunchAgent plist dictionary.
-
-    Args:
-        label: The launchd service label (e.g. ``"com.whisper.dictation"``).
-        executable: Absolute path to the Python interpreter.
-        script_path: Absolute path to the entry-point script.
-
-    Returns:
-        A dict suitable for serialisation with :func:`plistlib.dump`.
-    """
-    return {
-        "Label": label,
-        "ProgramArguments": [executable, script_path],
-        "RunAtLoad": True,
-        "KeepAlive": False,
-    }
