@@ -1,10 +1,12 @@
 from launchagent import build_launchagent_plist
 from whisper_core import (
+    BatchMode,
     DoTranscription,
     IgnoreKeyPress,
     SkipTranscription,
     StartRecording,
     StopRecording,
+    StreamingMode,
     WhisperSegment,
     classify_key_event,
     join_new_segments,
@@ -185,7 +187,10 @@ def test_given_args_returns_correct_plist_structure() -> None:
         script_path="/Users/josh/app.py",
     )
     assert plist["Label"] == "com.example.app"
-    assert plist["ProgramArguments"] == ["/usr/bin/python3", "/Users/josh/app.py"]
+    assert plist["ProgramArguments"] == [
+        "/usr/bin/python3",
+        "/Users/josh/app.py",
+    ]
     assert plist["RunAtLoad"] is True
     assert plist["KeepAlive"] is False
 
@@ -199,3 +204,50 @@ def test_given_different_args_values_are_reflected() -> None:
     assert plist["Label"] == "com.other.label"
     assert plist["ProgramArguments"][0] == "/opt/homebrew/bin/python3"
     assert plist["ProgramArguments"][1] == "/tmp/script.py"
+
+
+# ---------------------------------------------------------------------------
+# TranscriptionMode ADT
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_mode_instantiates() -> None:
+    mode = StreamingMode()
+    assert isinstance(mode, StreamingMode)
+
+
+def test_batch_mode_instantiates() -> None:
+    mode = BatchMode()
+    assert isinstance(mode, BatchMode)
+
+
+def test_streaming_mode_equality() -> None:
+    assert StreamingMode() == StreamingMode()
+
+
+def test_batch_mode_equality() -> None:
+    assert BatchMode() == BatchMode()
+
+
+def test_modes_are_not_equal() -> None:
+    assert StreamingMode() != BatchMode()
+
+
+def test_streaming_mode_is_frozen() -> None:
+    import dataclasses
+
+    import pytest
+
+    mode = StreamingMode()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        mode.x = 1  # type: ignore[misc]
+
+
+def test_batch_mode_is_frozen() -> None:
+    import dataclasses
+
+    import pytest
+
+    mode = BatchMode()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        mode.x = 1  # type: ignore[misc]

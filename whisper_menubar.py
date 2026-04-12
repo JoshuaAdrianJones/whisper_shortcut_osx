@@ -14,6 +14,7 @@ from typing import Any, assert_never
 
 import launchagent
 from whisper_core import (
+    BatchMode,
     DoTranscription,
     IgnoreKeyPress,
     RecorderEvent,
@@ -23,6 +24,8 @@ from whisper_core import (
     SkipTranscription,
     StartRecording,
     StopRecording,
+    StreamingMode,
+    TranscriptionMode,
     WhisperSegment,
     classify_key_event,
     join_new_segments,
@@ -69,6 +72,9 @@ class WhisperDictationApp:
         self.sample_rate = 16000
         self.chunk_interval = 3  # seconds between streaming transcriptions
         self.overlap_seconds = 1  # overlap between chunks for context
+
+        # Mode: StreamingMode pastes chunks during recording; BatchMode waits until stop
+        self.mode: TranscriptionMode = StreamingMode()
 
         # State variables
         self.recording = False
@@ -153,7 +159,11 @@ class WhisperDictationApp:
             assert self.stream is not None
             self.stream.start()
 
-            threading.Thread(target=self._streaming_transcribe_loop, daemon=True).start()
+            if isinstance(self.mode, StreamingMode):
+                threading.Thread(target=self._streaming_transcribe_loop, daemon=True).start()
+            else:
+                # Batch mode: no streaming thread; unblock stop_worker immediately
+                self._streaming_done.set()
             self._emit(RecordingStarted())
         except Exception as e:
             logger.exception("failed to start input stream")
@@ -219,6 +229,20 @@ class WhisperDictationApp:
             case _ as unreachable:
                 assert_never(unreachable)
 
+    def _transcribe_full_audio(self) -> None:
+        """Transcribe the entire recorded buffer in one pass (batch mode)."""
+        with self._audio_lock:
+            if not self.audio_data:
+                return
+            audio_array = np.concatenate(self.audio_data)
+        try:
+            result = mlx_whisper.transcribe(audio_array, path_or_hf_repo=self.model_repo)
+            text = "".join(seg["text"] for seg in result.get("segments", []))
+            if text.strip():
+                self._paste_text(text.strip())
+        except Exception:
+            logger.exception("batch transcription failed")
+
     def _paste_text(self, text: str) -> None:
         """Paste text at cursor position without saving/restoring clipboard"""
         try:
@@ -252,9 +276,12 @@ class WhisperDictationApp:
                     logger.exception("failed to close stream")
                 self.stream = None
 
-            # Signal the streaming thread to do its final pass and wait.
-            self._stop_event.set()
-            self._streaming_done.wait(timeout=30)
+            if isinstance(self.mode, StreamingMode):
+                # Signal the streaming thread to do its final pass and wait.
+                self._stop_event.set()
+                self._streaming_done.wait(timeout=30)
+            else:
+                self._transcribe_full_audio()
 
             # Restore original clipboard synchronously so a quick re-start
             # doesn't capture the transcript as "_original_clipboard".
@@ -329,6 +356,8 @@ class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
         # Create menu items
         self.status_item = rumps.MenuItem("Status: Ready", callback=None)
         self.record_button = rumps.MenuItem("Start Recording (⌥⌥)", callback=self.toggle_recording)
+        self.stream_mode_item = rumps.MenuItem("Streaming Mode", callback=self.toggle_stream_mode)
+        self.stream_mode_item.state = True  # streaming on by default
         self.login_item = rumps.MenuItem("Start at Login", callback=self.toggle_start_at_login)
         self.login_item.state = launchagent.is_active(LAUNCHAGENT_LABEL)
 
@@ -337,6 +366,7 @@ class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
             None,
             self.record_button,
             None,
+            self.stream_mode_item,
             self.login_item,
             None,
             "About",
@@ -374,7 +404,11 @@ class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
             case RecordingStarted():
                 self.is_recording = True
                 self.title = "🔴"
-                self.status_item.title = "Status: Recording & Transcribing..."
+                mode = self.whisper_app.mode if self.whisper_app else StreamingMode()
+                if isinstance(mode, StreamingMode):
+                    self.status_item.title = "Status: Recording & Transcribing..."
+                else:
+                    self.status_item.title = "Status: Recording..."
                 self.record_button.title = "Stop Recording (⌥)"
             case RecordingStopped():
                 self.is_recording = False
@@ -406,6 +440,13 @@ class WhisperMenuBarApp(rumps.App):  # type: ignore[misc]
             threading.Thread(target=self.whisper_app.stop_recording, daemon=True).start()
         else:
             threading.Thread(target=self.whisper_app.start_recording, daemon=True).start()
+
+    def toggle_stream_mode(self, sender: Any) -> None:
+        """Toggle between streaming (paste during recording) and batch (paste on stop)."""
+        if self.whisper_app is None:
+            return
+        sender.state = not sender.state
+        self.whisper_app.mode = StreamingMode() if sender.state else BatchMode()
 
     def toggle_start_at_login(self, sender: Any) -> None:
         """Toggle auto-start at login via LaunchAgent.

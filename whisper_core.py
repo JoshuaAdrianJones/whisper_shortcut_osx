@@ -6,6 +6,24 @@ No I/O, no model, no audio, no clipboard — plain data in, plain data out.
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
+# TranscriptionMode  (streaming: transcribe while recording; batch: wait until stop)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StreamingMode:
+    """Transcribe in chunks while recording and paste each chunk immediately."""
+
+
+@dataclass(frozen=True)
+class BatchMode:
+    """Accumulate all audio, then transcribe and paste once after recording stops."""
+
+
+TranscriptionMode = StreamingMode | BatchMode
+
+
+# ---------------------------------------------------------------------------
 # TranscriptionOutcome  (was: TranscriptionPlan with boolean mode flag)
 # ---------------------------------------------------------------------------
 
